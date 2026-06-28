@@ -1,0 +1,137 @@
+---
+description: Rules for writing repository classes in this project
+globs: repositories/**/*.py
+alwaysApply: false
+---
+
+# Repository Rules
+
+## Structure
+
+Every repository follows this layout:
+
+```python
+class XxxRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    # 1. private helpers (_base_query, _apply_filters)
+    # 2. read methods (get_by_id, get_all)
+    # 3. write methods (create, update, delete)
+```
+
+## Private helpers
+
+### `_base_query`
+Returns the base `select()` with all required `selectinload()` for relationships
+that appear in the response schema.
+
+```python
+def _base_query(self):
+    """Base SELECT with <relations> eagerly loaded."""
+    return select(XxxModel).options(
+        selectinload(XxxModel.relation_a),
+        selectinload(XxxModel.relation_b),
+    )
+```
+
+### `_apply_filters`
+Collects conditions into a list, then applies them in a single `.where(*conditions)`.
+Never mutate `stmt` per-condition — build the list first.
+
+```python
+def _apply_filters(self, stmt, filters: XxxFilterRequest):
+    """Narrow *stmt* by every non-None field in *filters*."""
+    conditions = []
+
+    if filters.field is not None:
+        conditions.append(XxxModel.field == filters.field)
+    if filters.from_date is not None:
+        conditions.append(XxxModel.created_at >= filters.from_date)
+    if filters.to_date is not None:
+        conditions.append(XxxModel.created_at <= filters.to_date)
+
+    return stmt.where(*conditions)
+```
+
+## Read methods
+
+### `get_by_id`
+```python
+async def get_by_id(self, id: uuid.UUID) -> XxxModel | None:
+    """Return a single record by primary key, or None if not found."""
+    stmt = self._base_query().where(XxxModel.id == id)
+    result = await self._session.execute(stmt)
+    return result.scalar_one_or_none()
+```
+
+### `get_all`
+Always returns `Tuple[List[XxxModel], int]` — items and total count in one call.
+Use `page` + `limit` (not raw `offset`) so callers can pass directly to `APIResponse.success_list`.
+
+```python
+async def get_all(
+    self,
+    filters: XxxFilterRequest,
+    page: int = 1,
+    limit: int = 10,
+) -> Tuple[List[XxxModel], int]:
+    """Return a page of records matching *filters* and the total count."""
+    offset = (page - 1) * limit
+    filter_stmt = self._apply_filters(self._base_query(), filters)
+
+    count_stmt = self._apply_filters(
+        select(func.count()).select_from(XxxModel), filters
+    )
+    total = (await self._session.execute(count_stmt)).scalar_one()
+
+    stmt = (
+        filter_stmt.order_by(XxxModel.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await self._session.execute(stmt)
+    items = list(result.scalars().all())
+    return items, total
+```
+
+## Write methods
+
+### `create`
+Stage the model with `session.add()` — **do not commit or flush** inside the repository.
+The caller (service layer) owns the transaction.
+
+```python
+async def create(self, ...) -> XxxModel:
+    """Stage a new record. Persisted on the next flush/commit."""
+    obj = XxxModel(...)
+    self._session.add(obj)
+    return obj
+```
+
+### `update`
+Mutate the model in place and return it. Do not call `session.add()` — SQLAlchemy
+tracks already-loaded instances automatically.
+
+```python
+async def update(self, obj: XxxModel, **kwargs) -> XxxModel:
+    for key, value in kwargs.items():
+        setattr(obj, key, value)
+    return obj
+```
+
+### `delete`
+```python
+async def delete(self, obj: XxxModel) -> None:
+    await self._session.delete(obj)
+```
+
+## Rules
+
+- Import the filter request schema from `schemas/requests/`.
+- Use `selectinload` (not `joinedload`) for optional/list relationships to avoid row duplication.
+- Never import from `schemas/responses/` inside a repository — responses are the router's concern.
+- Never call `session.commit()` or `session.flush()` inside a repository.
+- Use `| None` union syntax (Python 3.11+), not `Optional[X]`, for return types.
+- Use `Tuple[List[XxxModel], int]` from `typing` for the `get_all` return type.
+- Name the multi-record method `get_all`, never `list` (conflicts with the Python built-in).

@@ -1,0 +1,20 @@
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+COMMONS_DIR = os.path.join(ROOT, "commons")
+DATABASES_DIR = os.path.join(ROOT, "databases")
+DOCS_DIR = os.path.join(ROOT, "docs")
+EXCEPTIONS_DIR = os.path.join(ROOT, "exceptions")
+INFRASTRUCTURES_DIR = os.path.join(ROOT, "infrastructures")
+LOGGERS_DIR = os.path.join(ROOT, "loggers")
+MIDDLEWARES_DIR = os.path.join(ROOT, "middlewares")
+MODELS_DIR = os.path.join(ROOT, "models")
+REPOSITORIES_DIR = os.path.join(ROOT, "repositories")
+ROUTERS_DIR = os.path.join(ROOT, "routers")
+SCHEMAS_DIR = os.path.join(ROOT, "schemas")
+SCRIPTS_DIR = os.path.join(ROOT, "scripts")
+SERVICES_DIR = os.path.join(ROOT, "services")
+STORAGES_DIR = os.path.join(ROOT, "storages")
+TESTS_DIR = os.path.join(ROOT, "tests")
