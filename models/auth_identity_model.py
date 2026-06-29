@@ -22,12 +22,16 @@ class AuthProviderEnum(str, enum.Enum):
 class AuthIdentityModel(Base, UUIDPkMixin, TimestampMixin):
     __tablename__ = "auth_identities"
     __table_args__ = (
-        UniqueConstraint("provider", "provider_user_id", name="uq_identity_provider_uid"),
+        UniqueConstraint(
+            "provider", "provider_user_id", name="uq_identity_provider_uid"
+        ),
         UniqueConstraint("user_id", "provider", name="uq_identity_user_provider"),
         Index("ix_auth_identities_user_id", "user_id"),
     )
 
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
     provider: Mapped[AuthProviderEnum] = mapped_column(
         Enum(AuthProviderEnum, name="auth_provider")
     )

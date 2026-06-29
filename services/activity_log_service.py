@@ -13,10 +13,6 @@ class ActivityLogMixin:
 
     _TABLE: str
     _uow: UnitOfWork
-    _actor_id: Optional[UUID]
-    _company_id: Optional[UUID]
-    _ip_address: Optional[str]
-    _user_agent: Optional[str]
 
     async def _log_activity(
         self,
@@ -26,15 +22,15 @@ class ActivityLogMixin:
         after: Optional[dict] = None,
     ) -> None:
         await self._uow.activity_logs.create(
-            company_id=self._company_id,
-            actor_id=self._actor_id,
+            company_id=getattr(self, "_company_id", None),
+            actor_id=getattr(self, "_actor_id", None),
             table_name=self._TABLE,
             table_id=table_id,
             action=action,
             before=before,
             after=after,
-            ip_address=self._ip_address,
-            user_agent=self._user_agent,
+            ip_address=getattr(self, "_ip_address", None),
+            user_agent=getattr(self, "_user_agent", None),
         )
 
 

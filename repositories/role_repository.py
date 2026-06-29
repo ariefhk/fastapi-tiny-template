@@ -1,5 +1,5 @@
 import uuid
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,17 @@ class RoleRepository:
     async def get_by_id(self, id: uuid.UUID) -> RoleModel | None:
         """Return a single role by primary key, or None if not found."""
         stmt = self._base_query().where(RoleModel.id == id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+    
+
+    async def get_by_slug(
+        self, slug: str, company_id: uuid.UUID
+    ) -> Optional[RoleModel]:
+        stmt = self._base_query().where(
+            RoleModel.slug == slug,
+            RoleModel.company_id == company_id,
+        )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 

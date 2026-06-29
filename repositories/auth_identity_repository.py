@@ -11,24 +11,26 @@ class AuthIdentityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_by_user_and_provider(
-        self, user_id: uuid.UUID, provider: AuthProviderEnum
-    ) -> AuthIdentityModel | None:
-        """Return the identity for a user + provider pair, or None if not found."""
-        stmt = select(AuthIdentityModel).where(
-            AuthIdentityModel.user_id == user_id,
-            AuthIdentityModel.provider == provider,
+    async def get_password_identity(
+        self, user_id: uuid.UUID
+    ) -> Optional[AuthIdentityModel]:
+        """Return the password identity for a user, or None if not found."""
+        stmt = (
+            select(AuthIdentityModel)
+            .where(AuthIdentityModel.user_id == user_id)
+            .where(AuthIdentityModel.provider == AuthProviderEnum.PASSWORD.value)
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_by_email_and_provider(
-        self, email: str, provider: AuthProviderEnum
-    ) -> AuthIdentityModel | None:
-        """Return the identity for an email + provider pair, or None if not found."""
-        stmt = select(AuthIdentityModel).where(
-            AuthIdentityModel.email == email,
-            AuthIdentityModel.provider == provider,
+    async def get_by_provider(
+        self, provider: str, provider_user_id: str
+    ) -> Optional[AuthIdentityModel]:
+        """Return the identity matching a provider and its user ID, or None if not found."""
+        stmt = (
+            select(AuthIdentityModel)
+            .where(AuthIdentityModel.provider == provider)
+            .where(AuthIdentityModel.provider_user_id == provider_user_id)
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
@@ -36,24 +38,18 @@ class AuthIdentityRepository:
     async def create(
         self,
         user_id: uuid.UUID,
-        provider: AuthProviderEnum,
-        provider_user_id: Optional[str] = None,
-        password_hash: Optional[str] = None,
-        email: Optional[str] = None,
+        provider: str,
+        provider_user_id: Optional[str],
+        password_hash: Optional[str],
+        email: Optional[str],
     ) -> AuthIdentityModel:
         """Stage a new auth identity. Persisted on the next flush/commit."""
-        identity = AuthIdentityModel(
+        item = AuthIdentityModel(
             user_id=user_id,
             provider=provider,
             provider_user_id=provider_user_id,
             password_hash=password_hash,
             email=email,
         )
-        self._session.add(identity)
-        return identity
-
-    async def update(self, identity: AuthIdentityModel, **kwargs) -> AuthIdentityModel:
-        """Apply *kwargs* fields to *identity* in place and return it."""
-        for key, value in kwargs.items():
-            setattr(identity, key, value)
-        return identity
+        self._session.add(item)
+        return item

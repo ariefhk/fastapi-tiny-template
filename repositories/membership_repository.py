@@ -1,10 +1,13 @@
 import uuid
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from models.company_model import CompanyModel
 from models.membership_model import MembershipModel, MembershipStatusEnum
+from models.membership_role_model import MembershipRoleModel
 from schemas.requests.membership_request import MembershipFilterRequest
 
 
@@ -27,9 +30,13 @@ class MembershipRepository:
             conditions.append(MembershipModel.status == filters.status)
         return stmt.where(*conditions)
 
-    async def get_by_id(self, id: uuid.UUID) -> MembershipModel | None:
+    async def get_by_id(
+        self, id: uuid.UUID, company_id: Optional[uuid.UUID] = None
+    ) -> MembershipModel | None:
         """Return a single membership by primary key, or None if not found."""
         stmt = self._base_query().where(MembershipModel.id == id)
+        if company_id is not None:
+            stmt = stmt.where(MembershipModel.company_id == company_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -43,6 +50,32 @@ class MembershipRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_list_companies_by_user(
+        self, user_id: uuid.UUID
+    ) -> List[CompanyModel]:
+        """Return all companies the user is a member of."""
+        stmt = (
+            select(CompanyModel)
+            .join(MembershipModel, MembershipModel.company_id == CompanyModel.id)
+            .where(MembershipModel.user_id == user_id)
+            .order_by(CompanyModel.name.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_list_role_ids_by_membership(
+        self, membership_id: uuid.UUID
+    ) -> List[uuid.UUID]:
+        """Return all role IDs assigned to a membership."""
+        stmt = select(MembershipRoleModel.role_id).where(
+            MembershipRoleModel.membership_id == membership_id
+        )
+        result = await self._session.execute(stmt)
+        ids: List[uuid.UUID] = []
+        for row in result.all():
+            ids.append(row[0])
+        return ids
 
     async def get_all(
         self,
@@ -58,7 +91,11 @@ class MembershipRepository:
         )
         total = (await self._session.execute(count_stmt)).scalar_one()
         stmt = (
-            filter_stmt.order_by(MembershipModel.created_at.desc())
+            filter_stmt.options(
+                selectinload(MembershipModel.user),
+                selectinload(MembershipModel.company),
+            )
+            .order_by(MembershipModel.created_at.desc())
             .offset(offset)
             .limit(limit)
         )
@@ -73,7 +110,9 @@ class MembershipRepository:
         status: MembershipStatusEnum = MembershipStatusEnum.ACTIVE,
     ) -> MembershipModel:
         """Stage a new membership. Persisted on the next flush/commit."""
-        membership = MembershipModel(user_id=user_id, company_id=company_id, status=status)
+        membership = MembershipModel(
+            user_id=user_id, company_id=company_id, status=status
+        )
         self._session.add(membership)
         return membership
 

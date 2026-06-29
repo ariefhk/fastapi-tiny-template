@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from databases.session import get_db_session
+from repositories.access_repository import AccessRepository
 from repositories.activity_log_repository import ActivityLogRepository
 from repositories.auth_identity_repository import AuthIdentityRepository
 from repositories.company_repository import CompanyRepository
@@ -35,6 +36,7 @@ class UnitOfWork:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        self.access = AccessRepository(session)
         self.users = UserRepository(session)
         self.companies = CompanyRepository(session)
         self.activity_logs = ActivityLogRepository(session)

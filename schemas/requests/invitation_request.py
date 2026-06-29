@@ -17,3 +17,14 @@ class InvitationCreateRequest(BaseModel):
 class InvitationUpdateRequest(BaseModel):
     status: InvitationStatusEnum | None = None
     role_id: uuid.UUID | None = None
+
+
+class InvitationCreate(BaseModel):
+    email: EmailStr
+    role_id: uuid.UUID | None = None
+
+
+class InvitationAccept(BaseModel):
+    token: str
+    name: str
+    password: str

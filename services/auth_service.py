@@ -1,338 +1,238 @@
-import datetime as dt
-from typing import Tuple
-from uuid import UUID
+import re
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import List
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 
+from commons.access import AccessContext
+from commons.config import get_configs
 from commons.security import (
     create_access_token,
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
-    refresh_token_expires_at,
     verify_password,
 )
 from databases.unit_of_work import UnitOfWork
-from models.activity_log_model import ActivityLogAction
 from models.auth_identity_model import AuthProviderEnum
-from models.session_model import SessionModel
+from models.membership_model import MembershipStatusEnum
 from models.user_model import UserModel
-from schemas.requests.auth_request import (
-    LoginRequest,
-    RegisterRequest,
-    RequestPasswordResetRequest,
-    ResetPasswordRequest,
-    VerifyEmailRequest,
+from schemas.requests.auth_request import LoginRequest, RegisterRequest
+from schemas.responses.auth_response import (
+    AccessTokenResponse,
+    CompanyBrief,
+    MeResponse,
+    TokenResponse,
 )
 from schemas.responses.user_response import UserResponse
 
+_settings = get_configs()
+
 
 class AuthService:
-    def __init__(
-        self,
-        uow: UnitOfWork,
-        ip_address: str | None = None,
-        user_agent: str | None = None,
-    ) -> None:
+    def __init__(self, uow: UnitOfWork) -> None:
         self._uow = uow
-        self._ip_address = ip_address
-        self._user_agent = user_agent
 
-    # -------------------------------------------------------------------------
-    # Internal helpers
-    # -------------------------------------------------------------------------
+    def _slugify(self, value: str) -> str:
+        base = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+        if base == "":
+            base = "company"
+        return base + "-" + secrets.token_hex(3)
 
-    async def _create_session(
-        self, user: UserModel
-    ) -> Tuple[str, str, SessionModel]:
-        """Create a DB session and return (access_token, refresh_token, session)."""
-        raw_refresh = generate_refresh_token()
-        refresh_hash = hash_refresh_token(raw_refresh)
-        expires_at = refresh_token_expires_at()
-
+    async def _new_session_tokens(
+        self, user: UserModel, company_id: uuid.UUID
+    ) -> TokenResponse:
+        refresh_raw = generate_refresh_token()
+        refresh_hash = hash_refresh_token(refresh_raw)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            days=_settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS
+        )
         session = await self._uow.sessions.create(
             user_id=user.id,
-            active_company_id=user.last_active_company_id,
+            active_company_id=company_id,
             refresh_token_hash=refresh_hash,
             expires_at=expires_at,
         )
-        await self._uow.flush()
-        await self._uow.refresh(session)
-
-        access_token = create_access_token(
-            user_id=user.id,
-            session_id=session.id,
-            active_company_id=user.last_active_company_id,
-        )
-        return access_token, raw_refresh, session
-
-    async def _log(
-        self,
-        table_name: str,
-        table_id: UUID,
-        action: ActivityLogAction,
-        actor_id: UUID | None = None,
-        company_id: UUID | None = None,
-        before: dict | None = None,
-        after: dict | None = None,
-    ) -> None:
-        await self._uow.activity_logs.create(
-            company_id=company_id,
-            actor_id=actor_id,
-            table_name=table_name,
-            table_id=table_id,
-            action=action,
-            before=before,
-            after=after,
-            ip_address=self._ip_address,
-            user_agent=self._user_agent,
+        access_token = create_access_token(user.id, session.id, company_id)
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_raw,
+            user=UserResponse.model_validate(user),
         )
 
-    # -------------------------------------------------------------------------
-    # Public methods
-    # -------------------------------------------------------------------------
-
-    async def register(
-        self, body: RegisterRequest
-    ) -> Tuple[str, str, UserModel]:
-        """
-        Register a new user with email + password.
-
-        Creates the user row, a PASSWORD auth identity, and an email verification
-        token. Returns (access_token, refresh_token, user).
-        """
-        existing = await self._uow.users.get_by_email(body.email)
+    async def register(self, payload: RegisterRequest) -> TokenResponse:
+        existing = await self._uow.users.get_by_email(payload.email)
         if existing is not None:
-            raise HTTPException(status_code=409, detail="Email already registered")
-
-        user = await self._uow.users.create(email=body.email, name=body.name)
-        await self._uow.flush()
-        await self._uow.refresh(user)
-
-        await self._uow.auth_identities.create(
-            user_id=user.id,
-            provider=AuthProviderEnum.PASSWORD,
-            password_hash=hash_password(body.password),
-            email=body.email,
-        )
-
-        # Email verification token — expires in 24 h
-        raw_token = generate_refresh_token()
-        await self._uow.email_verification_tokens.create(
-            user_id=user.id,
-            token_hash=hash_refresh_token(raw_token),
-            expires_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24),
-        )
-
-        access_token, raw_refresh, session = await self._create_session(user)
-
-        await self._log(
-            table_name="users",
-            table_id=user.id,
-            action=ActivityLogAction.CREATE,
-            actor_id=user.id,
-            after=UserResponse.model_validate(user).model_dump(mode="json"),
-        )
-
-        return access_token, raw_refresh, user
-
-    async def login(self, body: LoginRequest) -> Tuple[str, str, UserModel]:
-        """
-        Authenticate with email + password.
-
-        Returns (access_token, refresh_token, user) or raises 401.
-        """
-        user = await self._uow.users.get_by_email(body.email)
-        identity = None
-        if user is not None:
-            identity = await self._uow.auth_identities.get_by_user_and_provider(
-                user_id=user.id, provider=AuthProviderEnum.PASSWORD
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
             )
 
-        # Constant-time guard — always call verify_password even on miss
-        password_ok = (
-            identity is not None
-            and identity.password_hash is not None
-            and verify_password(body.password, identity.password_hash)
+        user = await self._uow.users.create(
+            email=payload.email, name=payload.name, email_verified_at=None
         )
-        if user is None or not password_ok:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        access_token, raw_refresh, session = await self._create_session(user)
-
-        await self._log(
-            table_name="sessions",
-            table_id=session.id,
-            action=ActivityLogAction.LOGIN,
-            actor_id=user.id,
-            company_id=user.last_active_company_id,
+        await self._uow.auth_identities.create(
+            user_id=user.id,
+            provider=AuthProviderEnum.PASSWORD.value,
+            provider_user_id=None,
+            password_hash=hash_password(payload.password),
+            email=payload.email,
         )
 
-        return access_token, raw_refresh, user
+        company = await self._uow.companies.create(
+            name=payload.company_name,
+            slug=self._slugify(payload.company_name),
+            owner_user_id=user.id,
+        )
+        membership = await self._uow.memberships.create(
+            user_id=user.id,
+            company_id=company.id,
+            status=MembershipStatusEnum.ACTIVE,
+        )
 
-    async def refresh(self, raw_refresh_token: str) -> Tuple[str, UserModel]:
-        """
-        Issue a new access token from a valid refresh token.
+        owner_role = await self._uow.roles.create(
+            company_id=company.id, name="Owner", slug="owner", is_system=True
+        )
+        permission_ids = await self._uow.permissions.get_all_ids()
+        for permission_id in permission_ids:
+            await self._uow.role_permissions.create(owner_role.id, permission_id)
+        await self._uow.membership_roles.create(membership.id, owner_role.id)
 
-        Returns (new_access_token, user) or raises 401.
-        """
-        token_hash = hash_refresh_token(raw_refresh_token)
-        session = await self._uow.sessions.get_by_refresh_token_hash(token_hash)
-        if session is None:
-            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        await self._uow.users.update(user, last_active_company_id=company.id)
 
-        now = dt.datetime.now(dt.timezone.utc)
-        if session.expires_at.tzinfo is None:
-            expires = session.expires_at.replace(tzinfo=dt.timezone.utc)
-        else:
-            expires = session.expires_at
+        tokens = await self._new_session_tokens(user, company.id)
+        await self._uow.commit()
+        return tokens
 
-        if now > expires:
-            await self._uow.sessions.delete(session)
-            raise HTTPException(status_code=401, detail="Refresh token expired")
-
-        user = await self._uow.users.get_by_id(session.user_id)
+    async def login(self, payload: LoginRequest) -> TokenResponse:
+        user = await self._uow.users.get_by_email(payload.email)
         if user is None:
-            raise HTTPException(status_code=401, detail="User not found")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+            )
+
+        identity = await self._uow.auth_identities.get_password_identity(user.id)
+        if identity is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+            )
+        if identity.password_hash is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+            )
+        if verify_password(payload.password, identity.password_hash) is False:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+            )
+
+        company_id = user.last_active_company_id
+        if company_id is None:
+            companies = await self._uow.memberships.get_list_companies_by_user(user.id)
+            if len(companies) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No company membership",
+                )
+            company_id = companies[0].id
+
+        tokens = await self._new_session_tokens(user, company_id)
+        await self._uow.commit()
+        return tokens
+
+    async def refresh(self, refresh_token: str) -> AccessTokenResponse:
+        token_hash = hash_refresh_token(refresh_token)
+        session_row = await self._uow.sessions.get_by_refresh_token_hash(token_hash)
+        if session_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+            )
+        if session_row.expires_at < datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired"
+            )
 
         access_token = create_access_token(
-            user_id=user.id,
-            session_id=session.id,
-            active_company_id=session.active_company_id,
+            session_row.user_id, session_row.id, session_row.active_company_id
         )
+        return AccessTokenResponse(access_token=access_token)
 
-        await self._log(
-            table_name="sessions",
-            table_id=session.id,
-            action=ActivityLogAction.REFRESH,
-            actor_id=user.id,
-            company_id=session.active_company_id,
+    async def switch_company(
+        self, refresh_token: str, company_id: uuid.UUID
+    ) -> TokenResponse:
+        token_hash = hash_refresh_token(refresh_token)
+        session_row = await self._uow.sessions.get_by_refresh_token_hash(token_hash)
+        if session_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+            )
+
+        membership = await self._uow.memberships.get_by_user_and_company(
+            session_row.user_id, company_id
         )
+        if membership is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No membership in target company",
+            )
 
-        return access_token, user
+        await self._uow.sessions.set_active_company(session_row, company_id)
 
-    async def logout(self, session: SessionModel, actor_id: UUID) -> None:
-        """Revoke a single session."""
-        company_id = session.active_company_id
-        session_id = session.id
-        await self._uow.sessions.delete(session)
-        await self._log(
-            table_name="sessions",
-            table_id=session_id,
-            action=ActivityLogAction.LOGOUT,
-            actor_id=actor_id,
-            company_id=company_id,
+        new_refresh_raw = generate_refresh_token()
+        new_refresh_hash = hash_refresh_token(new_refresh_raw)
+        new_expires_at = datetime.now(timezone.utc) + timedelta(
+            days=_settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS
         )
+        await self._uow.sessions.rotate(session_row, new_refresh_hash, new_expires_at)
 
-    async def logout_all(self, user_id: UUID, company_id: UUID | None = None) -> None:
-        """Revoke all sessions for *user_id*."""
-        await self._uow.sessions.delete_by_user_id(user_id)
-        await self._log(
-            table_name="sessions",
-            table_id=user_id,
-            action=ActivityLogAction.LOGOUT_ALL,
-            actor_id=user_id,
-            company_id=company_id,
-        )
-
-    async def verify_email(self, body: VerifyEmailRequest) -> UserModel:
-        """
-        Mark the user's email as verified using the one-time token.
-
-        Raises 400 if the token is invalid, already used, or expired.
-        """
-        token_hash = hash_refresh_token(body.token)
-        token = await self._uow.email_verification_tokens.get_by_token_hash(token_hash)
-        if token is None:
-            raise HTTPException(status_code=400, detail="Invalid verification token")
-        if token.verified_at is not None:
-            raise HTTPException(status_code=400, detail="Token already used")
-
-        now = dt.datetime.now(dt.timezone.utc)
-        if token.expires_at.tzinfo is None:
-            expires = token.expires_at.replace(tzinfo=dt.timezone.utc)
-        else:
-            expires = token.expires_at
-
-        if now > expires:
-            raise HTTPException(status_code=400, detail="Verification token expired")
-
-        await self._uow.email_verification_tokens.update(token, verified_at=now)
-
-        user = await self._uow.users.get_by_id(token.user_id)
+        user = await self._uow.users.get_by_id(session_row.user_id)
         if user is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+        await self._uow.users.update(user, last_active_company_id=company_id)
 
-        await self._uow.users.update(user, email_verified_at=now)
-        await self._uow.flush()
-        await self._uow.refresh(user)
-
-        await self._log(
-            table_name="users",
-            table_id=user.id,
-            action=ActivityLogAction.UPDATE,
-            actor_id=user.id,
-            after={"email_verified_at": now.isoformat()},
+        access_token = create_access_token(session_row.user_id, session_row.id, company_id)
+        await self._uow.commit()
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=new_refresh_raw,
+            user=UserResponse.model_validate(user),
         )
 
-        return user
-
-    async def request_password_reset(
-        self, body: RequestPasswordResetRequest
-    ) -> None:
-        """
-        Create a password reset token for *email*.
-
-        Always returns silently — even if the email is not registered —
-        to prevent user enumeration.
-        """
-        user = await self._uow.users.get_by_email(body.email)
-        if user is None:
+    async def logout(self, refresh_token: str) -> None:
+        token_hash = hash_refresh_token(refresh_token)
+        session_row = await self._uow.sessions.get_by_refresh_token_hash(token_hash)
+        if session_row is None:
             return
+        await self._uow.sessions.delete(session_row)
+        await self._uow.commit()
 
-        raw_token = generate_refresh_token()
-        await self._uow.password_reset_tokens.create(
+    async def get_me(self, context: AccessContext) -> MeResponse:
+        user = await self._uow.users.get_by_id(context.user_id)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+
+        companies = await self._uow.memberships.get_list_companies_by_user(
+            context.user_id
+        )
+        company_briefs: List[CompanyBrief] = []
+        for company in companies:
+            company_briefs.append(CompanyBrief.model_validate(company))
+
+        permission_list: List[str] = []
+        for permission_key in context.permissions:
+            permission_list.append(permission_key)
+
+        return MeResponse(
             user_id=user.id,
-            token_hash=hash_refresh_token(raw_token),
-            expires_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1),
-        )
-
-    async def reset_password(self, body: ResetPasswordRequest) -> None:
-        """
-        Reset the user's password using a valid one-time token.
-
-        Raises 400 if the token is invalid, already used, or expired.
-        """
-        token_hash = hash_refresh_token(body.token)
-        token = await self._uow.password_reset_tokens.get_by_token_hash(token_hash)
-        if token is None:
-            raise HTTPException(status_code=400, detail="Invalid reset token")
-        if token.used_at is not None:
-            raise HTTPException(status_code=400, detail="Token already used")
-
-        now = dt.datetime.now(dt.timezone.utc)
-        if token.expires_at.tzinfo is None:
-            expires = token.expires_at.replace(tzinfo=dt.timezone.utc)
-        else:
-            expires = token.expires_at
-
-        if now > expires:
-            raise HTTPException(status_code=400, detail="Reset token expired")
-
-        identity = await self._uow.auth_identities.get_by_user_and_provider(
-            user_id=token.user_id, provider=AuthProviderEnum.PASSWORD
-        )
-        if identity is None:
-            raise HTTPException(status_code=400, detail="No password login for this account")
-
-        await self._uow.auth_identities.update(
-            identity, password_hash=hash_password(body.new_password)
-        )
-        await self._uow.password_reset_tokens.update(token, used_at=now)
-
-        await self._log(
-            table_name="password_reset_tokens",
-            table_id=token.id,
-            action=ActivityLogAction.UPDATE,
-            actor_id=token.user_id,
+            email=user.email,
+            name=user.name,
+            company_id=context.company_id,
+            plan=context.plan_slug,
+            permissions=permission_list,
+            features=context.features,
+            companies=company_briefs,
         )

@@ -1,5 +1,5 @@
 import uuid
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,23 +33,30 @@ class MembershipPermissionOverrideRepository:
                 MembershipPermissionOverrideModel.permission_id == filters.permission_id
             )
         if filters.effect is not None:
-            conditions.append(MembershipPermissionOverrideModel.effect == filters.effect)
+            conditions.append(
+                MembershipPermissionOverrideModel.effect == filters.effect
+            )
         return stmt.where(*conditions)
 
-    async def get_by_id(self, id: uuid.UUID) -> MembershipPermissionOverrideModel | None:
+    async def get_list_by_membership(
+        self, membership_id: uuid.UUID
+    ) -> List[MembershipPermissionOverrideModel]:
+        stmt = self._base_query().where(
+            MembershipPermissionOverrideModel.membership_id == membership_id
+        )
+        result = await self._session.execute(stmt)
+        items: List[MembershipPermissionOverrideModel] = list(result.scalars().all())
+        return items
+
+    async def get_by_id(
+        self, id: uuid.UUID, permission_id: Optional[uuid.UUID] = None
+    ) -> MembershipPermissionOverrideModel | None:
         """Return a single override by primary key, or None if not found."""
         stmt = self._base_query().where(MembershipPermissionOverrideModel.id == id)
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_by_membership_and_permission(
-        self, membership_id: uuid.UUID, permission_id: uuid.UUID
-    ) -> MembershipPermissionOverrideModel | None:
-        """Return the override for a membership-permission pair, or None if not found."""
-        stmt = self._base_query().where(
-            MembershipPermissionOverrideModel.membership_id == membership_id,
-            MembershipPermissionOverrideModel.permission_id == permission_id,
-        )
+        if permission_id is not None:
+            stmt = stmt.where(
+                MembershipPermissionOverrideModel.permission_id == permission_id
+            )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -75,6 +82,16 @@ class MembershipPermissionOverrideRepository:
         items = list(result.scalars().all())
         return (items, total)
 
+    async def get_by_membership_and_permission(
+        self, membership_id: uuid.UUID, permission_id: uuid.UUID
+    ) -> MembershipPermissionOverrideModel | None:
+        stmt = self._base_query().where(
+            MembershipPermissionOverrideModel.membership_id == membership_id,
+            MembershipPermissionOverrideModel.permission_id == permission_id,
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         membership_id: uuid.UUID,
@@ -97,7 +114,3 @@ class MembershipPermissionOverrideRepository:
         for key, value in kwargs.items():
             setattr(override, key, value)
         return override
-
-    async def delete(self, override: MembershipPermissionOverrideModel) -> None:
-        """Hard-delete a single permission override."""
-        await self._session.delete(override)

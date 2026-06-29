@@ -1,7 +1,6 @@
 import uuid
-from typing import List, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.role_permission_model import RolePermissionModel
@@ -22,36 +21,10 @@ class RolePermissionRepository:
         if filters.role_id is not None:
             conditions.append(RolePermissionModel.role_id == filters.role_id)
         if filters.permission_id is not None:
-            conditions.append(RolePermissionModel.permission_id == filters.permission_id)
+            conditions.append(
+                RolePermissionModel.permission_id == filters.permission_id
+            )
         return stmt.where(*conditions)
-
-    async def get_by_id(self, id: uuid.UUID) -> RolePermissionModel | None:
-        """Return a single role permission by primary key, or None if not found."""
-        stmt = self._base_query().where(RolePermissionModel.id == id)
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_all(
-        self,
-        filters: RolePermissionFilterRequest,
-        page: int = 1,
-        limit: int = 10,
-    ) -> Tuple[List[RolePermissionModel], int]:
-        """Return a page of role permissions matching *filters* and the total count."""
-        offset = (page - 1) * limit
-        filter_stmt = self._apply_filters(self._base_query(), filters)
-        count_stmt = self._apply_filters(
-            select(func.count()).select_from(RolePermissionModel), filters
-        )
-        total = (await self._session.execute(count_stmt)).scalar_one()
-        stmt = (
-            filter_stmt.order_by(RolePermissionModel.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-        )
-        result = await self._session.execute(stmt)
-        items = list(result.scalars().all())
-        return (items, total)
 
     async def create(
         self,
@@ -59,7 +32,9 @@ class RolePermissionRepository:
         permission_id: uuid.UUID,
     ) -> RolePermissionModel:
         """Stage a new role permission link. Persisted on the next flush/commit."""
-        role_permission = RolePermissionModel(role_id=role_id, permission_id=permission_id)
+        role_permission = RolePermissionModel(
+            role_id=role_id, permission_id=permission_id
+        )
         self._session.add(role_permission)
         return role_permission
 

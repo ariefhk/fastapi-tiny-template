@@ -4,7 +4,7 @@ from typing import List, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.feature_model import FeatureKindEnum, FeatureModel
+from models.feature_model import FeatureModel
 from schemas.requests.feature_request import FeatureFilterRequest
 
 
@@ -60,24 +60,3 @@ class FeatureRepository:
         result = await self._session.execute(stmt)
         items = list(result.scalars().all())
         return (items, total)
-
-    async def create(
-        self,
-        key: str,
-        name: str,
-        kind: FeatureKindEnum = FeatureKindEnum.BOOLEAN,
-    ) -> FeatureModel:
-        """Stage a new feature. Persisted on the next flush/commit."""
-        feature = FeatureModel(key=key, name=name, kind=kind)
-        self._session.add(feature)
-        return feature
-
-    async def update(self, feature: FeatureModel, **kwargs) -> FeatureModel:
-        """Apply *kwargs* fields to *feature* in place and return it."""
-        for k, v in kwargs.items():
-            setattr(feature, k, v)
-        return feature
-
-    async def delete(self, feature: FeatureModel) -> None:
-        """Hard-delete a single feature."""
-        await self._session.delete(feature)
